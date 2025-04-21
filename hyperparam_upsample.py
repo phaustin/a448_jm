@@ -17,6 +17,7 @@ import imblearn
 import xarray as xr
 import csv
 import pickle 
+import joblib
 from memory_profiler import profile
 import itertools
 # %%
@@ -206,67 +207,77 @@ def tune_hyperparameters(dict_hyper,X_train_all, y_train_bi,k):
     for value in dict_hyper.values():
         itterations*=len(value)
 
-    logging.basicConfig(filename='tuningU.log', level=logging.INFO)
-    with open('tunedU.csv','w',newline='') as file:
+    logging.basicConfig(filename='tuningU1.log', level=logging.INFO)
+    with open('tunedU1.csv','w',newline='') as file:
         writer = csv.writer(file)
         writer.writerow(fields)
 
         i = 0 # to count itterations
         for combinations in itertools.product(*dict_hyper.values()):
-            # the itertools.product function is like creating x nested for loops (where x is the number of keys in the dictionary)
-            # this method is cleaner and more generalizable than hardcoding the for loops 
-            dict_hyper_i = dict(zip(keys,combinations))
+            if combinations == (221624, 200, 12, 'gini', 9):
+                continue
+            else:
+                print(combinations)
+                # the itertools.product function is like creating x nested for loops (where x is the number of keys in the dictionary)
+                # this method is cleaner and more generalizable than hardcoding the for loops 
+                dict_hyper_i = dict(zip(keys,combinations))
 
-            i += 1
-            start = time()
-            logging.info(f'------------------------------------------------------------')
-            logging.info(f'Itteration number: {i} of {itterations}. {round(i/itterations*100,1)}% complete')
-            logging.info(f'Hyperparameters: {dict_hyper_i}')
+                i += 1
+                start = time()
+                logging.info(f'------------------------------------------------------------')
+                logging.info(f'Itteration number: {i} of {itterations}. {round(i/itterations*100,1)}% complete')
+                logging.info(f'Hyperparameters: {dict_hyper_i}')
 
-            # initialize the models 
-            rf = RandomForestClassifier(bootstrap=True, 
-                                        max_samples=dict_hyper_i['max_samples'], 
-                                        n_estimators=dict_hyper_i['n_estimators'], 
-                                        max_depth=dict_hyper_i['max_depth'], 
-                                        criterion=dict_hyper_i['criterion'])
-            lr = LinearRegression()
+                # initialize the models 
+                rf = RandomForestClassifier(bootstrap=True, 
+                                            max_samples=dict_hyper_i['max_samples'], 
+                                            n_estimators=dict_hyper_i['n_estimators'], 
+                                            max_depth=dict_hyper_i['max_depth'], 
+                                            criterion=dict_hyper_i['criterion'],
+                                            verbose=dict_hyper_i['verbose'])
 
-            # perform the stratified k-fold cross-validation
-            LL_rf_up_lis = []
-            ki = 0
-            for train_ii, test_ii in sk_folds.split(X_train_all, y_train_bi):
-                ki +=1
-                logging.info(f'K-fold: {ki}')
+                # perform the stratified k-fold cross-validation
+                LL_rf_up_lis = []
+                ki = 0
+                for train_ii, test_ii in sk_folds.split(X_train_all, y_train_bi):
+                    ki +=1
+                    if ki == 1:
+                        logging.info(f'K-fold: {ki}')
 
-                # index all the data according to the split indices
-                X_train = X_train_all[train_ii]
-                X_test = X_train_all[test_ii]
-                y_train = y_train_bi[train_ii]
-                y_test = y_train_bi[test_ii]
+                        # index all the data according to the split indices
+                        X_train = X_train_all[train_ii]
+                        X_test = X_train_all[test_ii]
+                        y_train = y_train_bi[train_ii]
+                        y_test = y_train_bi[test_ii]
 
-                # make an upsampled version of the training data
-                X_train_up, y_train_up = upsample(X_train,y_train)
-                logging.info(f'upsampled class ratio: {round(np.sum(y_train_up==1)/np.sum(y_train_up==0),3)}, original class ratio: {round(np.sum(y_train==1)/np.sum(y_train==0),3)}')
+                        # make an upsampled version of the training data
+                        X_train_up, y_train_up = upsample(X_train,y_train)
+                        logging.info(f'upsampled class ratio: {round(np.sum(y_train_up==1)/np.sum(y_train_up==0),3)}, original class ratio: {round(np.sum(y_train==1)/np.sum(y_train==0),3)}')
 
-                # fit the models
-                rf_up_fit = rf.fit(X_train_up,y_train_up) # RF with upsampled data
+                        # fit the models
+                        rf_up_fit = rf.fit(X_train_up,y_train_up) # RF with upsampled data
 
-                # test the models to get the Brier Score (note that they are all tested on the SAME data)
-                LL_rf_up = calc_LogLoss(rf_up_fit,X_test,y_test)
+                        # save the model
+                        joblib.dump(rf_up_fit, open(f'./models/RFup{i}.pkl','wb'), 9)
 
-                # append to lists
-                LL_rf_up_lis.append(LL_rf_up)
+                        # test the models to get the Brier Score (note that they are all tested on the SAME data)
+                        LL_rf_up = calc_LogLoss(rf_up_fit,X_test,y_test)
+
+                        # append to lists
+                        LL_rf_up_lis.append(LL_rf_up)
+                    else:
+                        continue 
             
-            # take average score over the k folds
-            LL_RF_up = np.mean(LL_rf_up_lis)
+                # take average score over the k folds
+                LL_RF_up = np.mean(LL_rf_up_lis)
 
-            logging.info(f'LL_rf_up: {LL_RF_up}')
-            end = time()
-            logging.info(f'Time for itteration: {(end-start)/60/60} hours')
+                logging.info(f'LL_rf_up: {LL_RF_up}')
+                end = time()
+                logging.info(f'Time for itteration: {(end-start)/60/60} hours')
 
-            # add the hyperparameters and the scores to the tuned.csv file 
-            lis_tuned = list(combinations) + [LL_RF_up]
-            writer.writerow(lis_tuned)
+                # add the hyperparameters and the scores to the tuned.csv file 
+                lis_tuned = list(combinations) + [LL_RF_up]
+                writer.writerow(lis_tuned)
 
         return
 # %%
@@ -282,18 +293,66 @@ else:
 
 y_train_all, X_train_all = retreive_X_y_train(training_dates,feature_lis,shape)
 y_train_bi = np.where(y_train_all>1,1,0)
+n_samples = X_train_all.shape[0]
 
+# initialize the models 
+rfu = RandomForestClassifier(bootstrap=True, 
+                            max_samples=int(n_samples/20), 
+                            n_estimators=200, 
+                            max_depth=None, 
+                            criterion='log_loss')
+
+rfw = RandomForestClassifier(bootstrap=True, 
+                            max_samples=int(n_samples/20), 
+                            n_estimators=200, 
+                            max_depth=None, 
+                            criterion='log_loss',
+                            class_weight = 'balanced_subsample')
+
+X_train_up, y_train_up = upsample(X_train_all,y_train_all)
+
+rf_up_fit = rfu.fit(X_train_up,y_train_up) # RF with upsampled data
+rf_w_fit = rfw.fit(X_train_all,y_train_all) # RF with regular data
+
+joblib.dump(rf_up_fit, open(f'./models/RFupfinal.pkl','wb'), 9)
+joblib.dump(rf_w_fit, open(f'./models/RFwfinal.pkl','wb'), 9)
+# %%
 # number of folds
 k = 3
 
 n_feature = X_train_all.shape[1]
 n_samples = X_train_all.shape[0]
 max_samples = [int(n_samples/20)] # max num of samples to draw from training data to train each tree (default = num of rows of training set)
-n_estimators = [1, 30, 60, 100] # max num of trees (default = 100)
+n_estimators = [200] # max num of trees (default = 100)
 max_depth = [n_feature, 50, None] # max depth of trees (first is num of features, None causes nodes to expand until all leaves are pure or until 2 samples per leaf)
-criterion = ['gini','entropy','log_loss'] # function to measure the quality of a split
+criterion = ['gini'] # function to measure the quality of a split
+verbose = [9] # makes the training process report whats going on
 
-dict_hyper = {'max_samples':max_samples, 'n_estimators':n_estimators, 'max_depth':max_depth, 'criterion':criterion}
+dict_hyper = {'max_samples':max_samples, 'n_estimators':n_estimators, 'max_depth':max_depth, 'criterion':criterion, 'verbose':verbose}
 
 tune_hyperparameters(dict_hyper,X_train_all, y_train_bi,k)
+
+
 # %%
+name = f'./models/RFw1.pkl'
+savefile = open(name,'rb')
+RF = joblib.load(savefile)
+
+sk_folds = StratifiedKFold(n_splits = 3, shuffle = False)
+
+ki = 0
+for train_ii, test_ii in sk_folds.split(X_train_all, y_train_bi):
+    ki +=1
+    if ki == 1:
+
+        # index all the data according to the split indices
+        X_test = X_train_all[test_ii]
+        y_test = y_train_bi[test_ii]
+
+        # test the models to get the Brier Score (note that they are all tested on the SAME data)
+        LL_rf_up = calc_LogLoss(RF,X_test,y_test)
+
+        print(LL_rf_up)
+
+# %%
+

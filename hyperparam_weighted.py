@@ -17,6 +17,7 @@ import imblearn
 import xarray as xr
 import csv
 import pickle 
+import joblib
 from memory_profiler import profile
 import itertools
 # %%
@@ -141,8 +142,8 @@ def tune_hyperparameters(dict_hyper,X_train_all, y_train_bi,k):
     for value in dict_hyper.values():
         itterations*=len(value)
 
-    logging.basicConfig(filename='tuningW.log', level=logging.INFO)
-    with open('tunedW.csv','w',newline='') as file:
+    logging.basicConfig(filename='tuningW1.log', level=logging.INFO)
+    with open('tunedW1.csv','w',newline='') as file:
         writer = csv.writer(file)
         writer.writerow(fields)
 
@@ -164,7 +165,8 @@ def tune_hyperparameters(dict_hyper,X_train_all, y_train_bi,k):
                                         n_estimators=dict_hyper_i['n_estimators'], 
                                         max_depth=dict_hyper_i['max_depth'], 
                                         criterion=dict_hyper_i['criterion'],
-                                        class_weight = dict_hyper_i['class_weight'])
+                                        class_weight = dict_hyper_i['class_weight'],
+                                        verbose=dict_hyper_i['verbose'])
             lr = LinearRegression()
 
             # perform the stratified k-fold cross-validation
@@ -173,25 +175,31 @@ def tune_hyperparameters(dict_hyper,X_train_all, y_train_bi,k):
             ki = 0
             for train_ii, test_ii in sk_folds.split(X_train_all, y_train_bi):
                 ki +=1
-                logging.info(f'K-fold: {ki}')
+                if ki==1:
+                    logging.info(f'K-fold: {ki}')
 
-                # index all the data according to the split indices
-                X_train = X_train_all[train_ii]
-                X_test = X_train_all[test_ii]
-                y_train = y_train_bi[train_ii]
-                y_test = y_train_bi[test_ii]
+                    # index all the data according to the split indices
+                    X_train = X_train_all[train_ii]
+                    X_test = X_train_all[test_ii]
+                    y_train = y_train_bi[train_ii]
+                    y_test = y_train_bi[test_ii]
 
-                # fit the models
-                rf_w_fit = rf.fit(X_train,y_train) # RF with original data 
-                lr_fit = lr.fit(X_train,y_train) # linear regression with original data
+                    # fit the models
+                    rf_w_fit = rf.fit(X_train,y_train) # RF with original data 
+                    lr_fit = lr.fit(X_train,y_train) # linear regression with original data
 
-                # test the models to get the log loss (note that they are all tested on the SAME data)
-                LL_rf_w = calc_LogLoss(rf_w_fit,X_test,y_test)
-                LL_lr = calc_LogLoss(lr_fit,X_test,y_test)
+                    # save the model
+                    joblib.dump(rf_w_fit, open(f'./models/RFw{i}.pkl','wb'), 9)
 
-                # append to lists
-                LL_rf_w_lis.append(LL_rf_w)
-                LL_lr_lis.append(LL_lr)
+                    # test the models to get the log loss (note that they are all tested on the SAME data)
+                    LL_rf_w = calc_LogLoss(rf_w_fit,X_test,y_test)
+                    LL_lr = calc_LogLoss(lr_fit,X_test,y_test)
+
+                    # append to lists
+                    LL_rf_w_lis.append(LL_rf_w)
+                    LL_lr_lis.append(LL_lr)
+                else:
+                    continue
             
             # take average score over the k folds
             LL_RF_w = np.mean(LL_rf_w_lis)
@@ -226,12 +234,13 @@ k = 3
 n_feature = X_train_all.shape[1]
 n_samples = X_train_all.shape[0]
 max_samples = [int(n_samples/20)] # max num of samples to draw from training data to train each tree (default = num of rows of training set)
-n_estimators = [1, 30, 60, 100] # max num of trees (default = 100)
+n_estimators = [200] # max num of trees (default = 100)
 max_depth = [n_feature, 50, None] # max depth of trees (first is num of features, None causes nodes to expand until all leaves are pure or until 2 samples per leaf)
-criterion = ['gini','entropy','log_loss'] # function to measure the quality of a split
+criterion = ['gini'] # function to measure the quality of a split
 class_weight = ['balanced_subsample']
+verbose = [9]
 
-dict_hyper = {'max_samples':max_samples, 'n_estimators':n_estimators, 'max_depth':max_depth, 'criterion':criterion, 'class_weight':class_weight}
+dict_hyper = {'max_samples':max_samples, 'n_estimators':n_estimators, 'max_depth':max_depth, 'criterion':criterion, 'class_weight':class_weight, 'verbose':verbose}
 
 tune_hyperparameters(dict_hyper,X_train_all, y_train_bi,k)
 # %%
