@@ -11,6 +11,197 @@ import pickle
 import imageio as io
 import imblearn
 
+def get_wrf(name):
+    """""
+    In: name of wrf dataset (c)
+    Out: WRF dataset for specified time
+    """""
+    start = time()
+    path_wrf = "/Users/jmceachern/wrf_data/"
+    end = time()
+    print('get_wrf: ',end-start)
+    return Dataset(path_wrf+name)
+
+def get_glm(yy,mm, dd, tt):
+    """""
+    In: year, month, day, time
+    Out: 1 hour of GLM data and returns list of netCDF4 files.
+    There is one files for every 20s 
+    """""
+
+    # j_day = days since Jan 1st of yy
+    start = time()
+    j_day = (datetime.datetime(int(yy), int(mm), int(dd)) - datetime.datetime(int(yy),1,1)).days + 1
+    path_glm = '/Users/jmceachern/data/noaa-goes16/GLM-L2-LCFA/'+str(yy)+'/'+str(j_day)+'/'+str(tt)+'/'
+
+    list_of_paths = glob.glob(path_glm+'*.nc', recursive=True)
+
+    ds_lis = []
+    for name in list_of_paths:
+        ds = Dataset(name)
+        ds_lis.append(ds)
+    end = time()
+
+    print('get_glm: ',end-start)
+    return ds_lis
+
+def extract_vars(ds_w):
+    """""
+    In: list of WRF datasets (1 item per timestep) and extracts / calculates all desired variables 
+    Out: 2D array where each column is a flat (1D) version of the WRF variables (matrix X for ML models)
+    """""
+    start = time()
+    all_vars_lis = []
+    for i in range(len(extract_times(ds_w,timeidx=ALL_TIMES))):
+        pw = getvar(ds_w,'pw', timeidx = i)
+        time_utc = extract_times(ds_w,timeidx=i,do_xtime='XTIME')/60 # time im hours
+        cape_cin_LCL = getvar(ds_w,'cape_2d', timeidx = i)
+        cape2 = cape_cin_LCL[0]
+        cin2 = cape_cin_LCL[1]
+        LCL = cape_cin_LCL[2]
+        Td = getvar(ds_w,'td',units='K', timeidx = i)
+        z = getvar(ds_w,"height_agl", units = "m", timeidx = i)
+        P = getvar(ds_w,"p",units='Pa', timeidx = i)
+        t = getvar(ds_w, 'temp',units='K', timeidx = i)
+        T2 = getvar(ds_w,'T2', timeidx = i)
+
+        w = getvar(ds_w, "wa", units = "m s-1", timeidx = i) 
+        wspd_wdir = getvar(ds_w, 'wspd_wdir', timeidx = i)
+        wspd, wdir = wspd_wdir[0], wspd_wdir[1]
+
+        qi = np.abs(getvar(ds_w,"QICE", timeidx = i))*1000 # ice mixing ratio (g/kg)
+        qs = np.abs(getvar(ds_w, "QSNOW", timeidx = i))*1000 # snow mixing ratio (g/kg)
+        qg = np.abs(getvar(ds_w, "QGRAUP", timeidx = i))*1000 # graupel mixing ratio (g/kg)
+
+        lat = getvar(ds_w,'lat', timeidx = i)
+        lon = getvar(ds_w,'lon', timeidx = i)
+        slp = getvar(ds_w,'slp',units = 'atm', timeidx = i)
+        ctt = getvar(ds_w,'ctt',timeidx=i)
+
+        # calculate dz for each layer
+        layers = z.shape[0]
+
+        # array of same shape as z to store the dz values 
+        dz = np.zeros_like(z)
+        for n in range(layers-1):
+            dz[n,:,:] = z[n+1,:,:] - z[n,:,:]
+
+        K = calc_features.calc_Kindex(t,P,Td)
+        SWI = calc_features.calc_SWI(t,P,Td,wspd,wdir)
+        LI = calc_features.calc_LI(t,P,z,LCL,dz)
+        SI = calc_features.calc_SI(t,P,z,LCL,dz)
+        wmax = calc_features.calc_wmax(w)
+        Qi, Qs, Qg, Q = calc_features.calc_Qs(qi,qs,qg,dz)
+
+        vars_li = [pw,cape2,cin2,T2,slp,ctt,K,SWI,LI,SI,wmax,Q]
+        processed_li = []
+        for i,var in enumerate(vars_li):
+            flat = np.array(var).flatten()
+            norm = (flat - np.sort(flat)[0]) / (-np.sort(-flat)[0] - np.sort(flat)[0])
+            nanless = np.where(norm>-999,norm,0)
+            processed_li.append(nanless)
+        all_vars_lis.append(np.array(processed_li).T)
+    maxtix_X = np.concatenate(all_vars_lis,axis=0)
+
+    end = time()
+    print("extract wrf vars: ", end-start)
+    return maxtix_X
+
+def make_array(wrf_ds, glm_lis):
+    """""
+    In: WRF data (used only to duplicate its format) and list of GLM data where each item is one hours worth of data.
+    Out: GLM data in 2D array of same shape as WRF array with each flash being placed at its specified lat and lon 
+    Note: this is the full WRF 12 km domain (which will be further subset)
+    """""
+    start = time()
+    latlis = []
+    lonlis = []
+    for ds in glm_lis:
+        # extract lats and lons from GLM array and add to lists
+        latlis.append(ds.variables['flash_lat'][:])
+        lonlis.append(ds.variables['flash_lon'][:])
+    # concatinate lists to get one long column representing 1 hours of GLM obs. 
+    lat = np.concatenate(latlis)
+    lon = np.concatenate(lonlis)
+
+    lats = getvar(wrf_ds,"XLAT")
+    lons = getvar(wrf_ds,"XLONG")
+    shape = lats.shape # shape of wrf array
+
+    try:
+        ## try and open kdtree for domain
+        lightning_tree, lightning_loc = pickle.load(open('/Users/jmceachern/lightning/KDTree/lightning_tree.p', "rb"))
+        print('Found lightning Tree')
+    except:
+        ## build a kd-tree 
+        print("Could not find KDTree building....")
+        ## create dataframe with columns of all lat/long in the domian...rows are cord pairs 
+        lightning_locs = pd.DataFrame({"XLAT": lats.values.ravel(), "XLONG": lons.values.ravel()})
+        ## build kdtree
+        lightning_tree = KDTree(lightning_locs)
+        ## save tree
+        pickle.dump([lightning_tree, lightning_locs], open('/Users/jmceachern/lightning/KDTree/lightning_tree.p', "wb"))
+        print("KDTree built")
+
+    df = pd.DataFrame()
+    df['lon']=lon
+    df['lat']=lat
+
+    south_north,  west_east = [], []
+    for loc in df.itertuples(index=True, name='Pandas'):
+        ## arange lightning lat and long in a formate to query the kdtree
+        single_loc = np.array([loc.lat, loc.lon]).reshape(1, -1)
+
+        ## query the kdtree retuning the distacne of nearest neighbor and the index on the raveled grid
+        flash_dist, flash_ind = lightning_tree.query(single_loc, k=1)
+
+        ## set condition to pass on flshes outside model domian 
+        if flash_dist > 0.5:
+            pass
+        else:
+            ## if condition passed reformate 1D index to 2D indexes
+            ind = np.unravel_index(flash_ind[0][0], shape)
+            ## append the indexes to lists
+            south_north.append(ind[0])
+            west_east.append(ind[1])
+
+    tup_lis = tuple(zip(south_north,west_east))
+    count = []
+    for tup in tup_lis:
+        count.append(tup_lis.count(tup)) # this counts duplicate tuples (gets the count for lightning in each gridcell)
+
+    new_lis = tuple(zip(tup_lis,count))
+    no_repeats = list(dict.fromkeys(new_lis)) # this gets rid of repeats
+
+    rows, cols = list(zip(*list(zip(*no_repeats))[0]))[0], list(zip(*list(zip(*no_repeats))[0]))[1]
+    count = list(zip(*no_repeats))[1]
+
+    ds_final = xr.DataArray(np.zeros_like(lats))
+    for i,num in enumerate(count):
+        ds_final[rows[i],cols[i]] = num
+
+    end = time()
+    print("make glm array with KDTree: ",end-start)
+    return ds_final.to_numpy()
+
+def get_X_y(name,ytr,mtr,dtr,time_lis):
+    """""
+    In: testing year, month, day, and hours (as a list)
+    Out: the X,y array of calculated WRF features over the WRF domain for a full day of data (this is used for training)
+    """""
+    wrf_ds_train = get_wrf(name)
+    X = extract_vars(wrf_ds_train)
+
+    glm_train_lis = []
+    for t in time_lis:
+        glm_lis_temp = get_glm(ytr, mtr, dtr, t)
+        glm_ds_train = make_array(wrf_ds_train,glm_lis_temp)
+        glm_flat = glm_ds_train.flatten()
+        glm_train_lis.append(glm_flat)
+    y = np.concatenate(glm_train_lis,axis=0)
+
+    return y, X
+
 def contingency_table(y_hat, y):
     """""
     In: y_hat = model prediction, y = observations
@@ -227,6 +418,60 @@ def upsample(X, y, r_f=0.5):
             print(f'Batch {i} had no class 1s. Skiped this batch.')
             continue
         i+=1
+
+    # merge the list of arrays together to get the entire upsampled data set
+    X_upsampled = np.concatenate(X_upsampled_lis)
+    y_upsampled = np.concatenate(y_upsampled_lis)
+
+    return X_upsampled, y_upsampled
+
+def undersample(X, y, r_f=0.5):
+    """
+    Undersaple the X maxtrix and y vector to acheive a final class ratio given by r_f. 
+    To prevent the kernel from crashing, the data gets split into batches then upsampled seperately.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        X matrix of features of shape (n_samples, n_features)
+    y : np.ndarray
+        y vector of target values of shape (n_samples, )
+    r_f: float
+        Desired class ratio after upsampling. Value between 0 and 1. If None = 0.5. 
+
+    Returns
+    ------
+    X_upsampled : np.ndarray
+        Upsampeld matrix X 
+    y_upsampled : np.ndarray
+        Upsampled vector y 
+
+    Notes:
+    _____
+    This function relies on the SMOTE from the imblearn over_sampling class and RandomeUnderSampler from the under_sampling class 
+    """
+
+    n_in_batch = 4432488 # number of samples in one batch (this is the number of samples in 1 days worth of WRF data)
+
+    n_batches = int(X.shape[0] / n_in_batch) # number of batches (number of training days). Its okay if this isnt an int!
+
+    X_batches_lis = np.array_split(X, n_batches) # splitting the arrays doesnt change the order so we can do this to X and y without worrying about the indicies getting mixed up
+    y_batches_lis = np.array_split(y, n_batches)
+
+    # empty lists to hold the upsampled data
+    X_upsampled_lis = []
+    y_upsampled_lis = []
+
+    # itterate over each of the batches
+    for X_batch,y_batch in zip(X_batches_lis,y_batches_lis):
+
+        # initialize the undersampler with the desired final class ratio 
+        undersample = imblearn.under_sampling.RandomUnderSampler(sampling_strategy=r_f)
+        X_u,y_u = undersample.fit_resample(X_batch,y_batch)
+
+        # append to the empty lists 
+        X_upsampled_lis.append(X_u)
+        y_upsampled_lis.append(y_u)
 
     # merge the list of arrays together to get the entire upsampled data set
     X_upsampled = np.concatenate(X_upsampled_lis)
